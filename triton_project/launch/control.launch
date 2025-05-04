@@ -1,7 +1,0 @@
-<launch>
-  <!-- Node on laptop -->
-  <node name="gesture_listener" pkg="triton_project" type="gesture_listener.py" output="screen"/>
-
-  <!-- Node on Triton robot -->
-  <node name="triton_controller" pkg="triton_project" type="triton_controller.py" output="screen"/>
-</launch>
