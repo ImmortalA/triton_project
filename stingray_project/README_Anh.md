@@ -5,6 +5,9 @@
 scp -r ~/stingray_docker/catkin_ws/src/stingray_project triton@192.168.0.123:~/catkin_ws/src/
 
 1. Setup
+- Robot: Open terminal
+ssh triton@192.168.0.123
+export ROS_IP=192.168.0.123
 
 - Laptop:
 export ROS_MASTER_URI=http://192.168.0.123:11311
@@ -17,7 +20,3 @@ roslaunch stingray_project triton.launch
 - Laptop:
 source ~/stingray_docker/catkin_ws/devel/setup.bash
 rosrun stingray_project gesture_controller.py
-
-
-
-
