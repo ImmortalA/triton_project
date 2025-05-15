@@ -6,6 +6,7 @@ import mediapipe as mp
 import rospy
 from geometry_msgs.msg import Twist
 import threading
+from std_srvs.srv import SetBool
 
 # Hide TensorFlow/MediaPipe CUDA warnings
 os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
@@ -15,6 +16,9 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 rospy.init_node("gesture_controller")
 pub = rospy.Publisher("/cmd_vel", Twist, queue_size=10)
 rate = rospy.Rate(10)
+
+rospy.wait_for_service('toggle_follower')
+toggle = rospy.ServiceProxy('toggle_follower', SetBool)
 
 # MediaPipe init
 mp_hands = mp.solutions.hands
@@ -29,8 +33,12 @@ mp_draw = mp.solutions.drawing_utils
 shared_twist = Twist()
 lock = threading.Lock()
 
+# Velocity values
 linear_vel = 0.3
 angular_vel = 0.1
+
+# Flag for human-following activation
+human_following_active = False
 
 def is_finger_up(tip, pip, wrist):
     return tip.y < pip.y < wrist.y
@@ -83,11 +91,46 @@ def classify_gesture(landmarks, handedness):
     if handedness == "Left" and thumb_tip.x < index_tip.x - 0.05:
         return "rotate_left"
 
+    # 👍 Thumbs up = activate human-following
+    if (
+        thumb_tip.y < thumb_ip.y and
+        not is_finger_up(index_tip, index_pip, wrist) and
+        not is_finger_up(middle_tip, middle_pip, wrist) and
+        not is_finger_up(ring_tip, ring_pip, wrist) and
+        not is_finger_up(pinky_tip, pinky_pip, wrist)
+    ):
+        return "activate_following"
+
+    # 👎 Thumbs down = deactivate human-following
+    if (
+        thumb_tip.y > thumb_ip.y and
+        not is_finger_up(index_tip, index_pip, wrist) and
+        not is_finger_up(middle_tip, middle_pip, wrist) and
+        not is_finger_up(ring_tip, ring_pip, wrist) and
+        not is_finger_up(pinky_tip, pinky_pip, wrist)
+    ):
+        return "deactivate_following"
+
     return "none"
 
 def publish_command(gesture):
-    global shared_twist
+    global shared_twist, human_following_active
     twist = Twist()
+
+    if gesture == "activate_following":
+        human_following_active = True
+        rospy.loginfo("[GESTURE] Human-following ACTIVATED")
+        toggle(True)
+        return
+
+    elif gesture == "deactivate_following":
+        human_following_active = False
+        rospy.loginfo("[GESTURE] Human-following DEACTIVATED")
+        toggle(False)
+        return
+
+    if not human_following_active:
+        return
 
     if gesture == "move_forward":
         twist.linear.x = linear_vel
@@ -96,7 +139,7 @@ def publish_command(gesture):
     elif gesture == "rotate_left":
         twist.angular.z = angular_vel
     elif gesture == "rotate_right":
-        twist.angular.z = -angular_vel
+        twist.angular.z = -angular_vel * 5
     elif gesture == "stop":
         twist.linear.x = 0.0
         twist.angular.z = 0.0
@@ -108,7 +151,7 @@ def publish_command(gesture):
 
     rospy.loginfo(f"[GESTURE] Sent: {gesture}")
 
-# Background publisher
+# Background publisher thread
 def continuous_publisher():
     while not rospy.is_shutdown():
         with lock:
@@ -125,7 +168,7 @@ while not rospy.is_shutdown() and cap.isOpened():
     if not success:
         continue
 
-    frame = cv2.flip(frame, 1)  # Mirror webcam image (optional for natural feel)
+    frame = cv2.flip(frame, 1)
 
     image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = hands.process(image)
@@ -141,6 +184,11 @@ while not rospy.is_shutdown() and cap.isOpened():
             gesture = classify_gesture(landmarks, handedness)
             publish_command(gesture)
             mp_draw.draw_landmarks(image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+
+    # Show activation status on screen
+    status_color = (0, 255, 0) if human_following_active else (0, 0, 255)
+    cv2.putText(image, f"FOLLOWING: {'ON' if human_following_active else 'OFF'}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
 
     cv2.imshow("Gesture Control", image)
     if cv2.waitKey(5) & 0xFF == 27:
