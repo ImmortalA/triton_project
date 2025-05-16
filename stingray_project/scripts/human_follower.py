@@ -9,6 +9,7 @@ from sensor_msgs.msg import Image
 from geometry_msgs.msg import Twist
 from std_srvs.srv import SetBool, SetBoolResponse
 import warnings
+from threading import Thread
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -32,15 +33,23 @@ class HumanFollower:
 
         # Command rate limiter
         self.last_cmd_time = rospy.Time.now()
-        self.cmd_interval = rospy.Duration(1) # 1 second
+        self.pub_rate = rospy.Rate(0.5)
+        
         self.last_twist = Twist()
 
         # Subscribers and services
         rospy.Subscriber('/camera/color/image_raw', Image, self.rgb_callback, queue_size=1)
         rospy.Subscriber('/camera/aligned_depth_to_color/image_raw', Image, self.depth_callback, queue_size=1)
         rospy.Service('toggle_follower', SetBool, self.handle_toggle)
+        Thread(target=self.publish_loop, daemon=True).start()
 
         rospy.spin()
+
+    def publish_loop(self):
+        while not rospy.is_shutdown():
+            self.cmd_pub.publish(self.last_twist)
+            rospy.loginfo(f"Published command: Linear: {self.last_twist.linear.x:.2f}, Angular: {self.last_twist.angular.z:.2f}")
+            self.pub_rate.sleep()
 
     def handle_toggle(self, req):
         self.is_active = req.data
@@ -63,7 +72,7 @@ class HumanFollower:
         valid = patch[(patch > 0) & (~np.isnan(patch))]
 
     
-        return np.min(valid) / 1000.0 if valid.size > 0 else None
+        return np.mean(valid) / 1000.0 if valid.size > 0 else None
 
 
     def get_offset(self, foot_x, center_x):
@@ -78,6 +87,7 @@ class HumanFollower:
     def process_images(self):
         if not self.is_active:
             return
+        rospy.loginfo("Processing images...")
         
         twist = Twist()
         height, width, _ = self.rgb_image.shape
@@ -114,32 +124,19 @@ class HumanFollower:
 
             depth_value = self.get_depth_value(foot_x, foot_y, height, width)
             if depth_value is None:
-
+                rospy.logwarn("Invalid depth value")
                 depth_value = 0.8 # Default to 1.0 if depth is invalid, to avoid stopping angular velocity
 
             offset = self.get_offset(foot_x, width // 2)
             norm_offset = offset / (width / 2.0)
 
-            # Enforce rate limit
-            # now = rospy.Time.now()
-            # if (now - self.last_cmd_time) < self.cmd_interval:
-            #     rospy.loginfo(f"Rate limit: only {(now - self.last_cmd_time).to_sec():.2f}s since last command")
-            #     break
-
-            
-            # self.last_cmd_time = rospy.Time.now()
             
             twist = self.compute_cmd_vel(norm_offset, depth_value)
             
             break  # only act on the first person
 
-        if self.last_twist != twist:
-            # Only publish if the command has changed
-            self.cmd_pub.publish(twist)
-            rospy.loginfo(f"Linear: {twist.linear.x:.2f}, Angular: {twist.angular.z:.2f}")
-
-
         self.last_twist = twist
+        rospy.loginfo(f"Linear: {twist.linear.x:.2f}, Angular: {twist.angular.z:.2f}")
         self.display_image()
 
 
@@ -162,7 +159,7 @@ class HumanFollower:
         if depth > 2.5:
             twist.linear.x = 0.2  # Far → move fast
         elif depth > 0.8:
-            twist.linear.x = 0.15  # Normal follow
+            twist.linear.x = 0.2  # Normal follow
         else:
             twist.linear.x = 0.0   # Stop
     
