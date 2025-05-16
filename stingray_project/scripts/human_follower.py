@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import rospy
 import torch
+from ultralytics import YOLO
 import numpy as np
 import cv2
 from cv_bridge import CvBridge
@@ -25,12 +26,14 @@ class HumanFollower:
 
         # YOLOv5 model for person detection (class 0)
         # self.model = torch.hub.load('ultralytics/yolov5', 'yolov5s', pretrained=True)
-        self.model = torch.hub.load('ultralytics/yolov5', 'yolov5n', pretrained=True)
-        self.model.classes = [0]
+        self.model = YOLO("yolo11n.pt")
+
+        # self.model.classes = [0]
 
         # Command rate limiter
         self.last_cmd_time = rospy.Time.now()
-        self.cmd_interval = rospy.Duration(1) # 1 second 
+        self.cmd_interval = rospy.Duration(1) # 1 second
+        self.last_twist = Twist()
 
         # Subscribers and services
         rospy.Subscriber('/camera/color/image_raw', Image, self.rgb_callback, queue_size=1)
@@ -58,6 +61,7 @@ class HumanFollower:
     
         patch = self.depth_image[y0:y1, x0:x1]
         valid = patch[(patch > 0) & (~np.isnan(patch))]
+
     
         return np.min(valid) / 1000.0 if valid.size > 0 else None
 
@@ -82,13 +86,21 @@ class HumanFollower:
         center_x = width // 2
         cv2.line(self.rgb_image, (center_x, 0), (center_x, height), (0, 255, 0), 2)
 
-        boxes = self.model(self.rgb_image).xyxy[0].cpu().numpy()
+        # boxes = self.model(self.rgb_image).xyxy[0].cpu().numpy()
+
+        # results = self.model(self.rgb_image)[0]
+        results = self.model(self.rgb_image, verbose=False)[0]
+        boxes = results.boxes.cpu().numpy()  # xyxy + confidence + class
         for box in boxes:
-            x1, y1, x2, y2, conf, cls = box
+            # x1, y1, x2, y2, conf, cls = box
+
+            x1, y1, x2, y2 = box.xyxy[0]
+            conf = box.conf[0]
+            cls = box.cls[0]
 
             # Check if the detected object is a person (class 0) with sufficient confidence
             if conf < 0.2 or cls != 0:
-                rospy.loginfo(f"Skipping detection: Class {cls}, Confidence {conf:.2f}")
+                # rospy.loginfo(f"Skipping detection: Class {cls}, Confidence {conf:.2f}")
                 continue
 
             foot_x, foot_y = self.get_foot_position(x1, y1, x2, y2)
@@ -102,27 +114,32 @@ class HumanFollower:
 
             depth_value = self.get_depth_value(foot_x, foot_y, height, width)
             if depth_value is None:
-                depth_value = 1.0 # Default to 1.0 if depth is invalid, to avoid stopping angular velocity
+
+                depth_value = 0.8 # Default to 1.0 if depth is invalid, to avoid stopping angular velocity
 
             offset = self.get_offset(foot_x, width // 2)
             norm_offset = offset / (width / 2.0)
 
             # Enforce rate limit
-            now = rospy.Time.now()
-            if (now - self.last_cmd_time) < self.cmd_interval:
-                rospy.loginfo(f"Rate limit: only {(now - self.last_cmd_time).to_sec():.2f}s since last command")
-                break
+            # now = rospy.Time.now()
+            # if (now - self.last_cmd_time) < self.cmd_interval:
+            #     rospy.loginfo(f"Rate limit: only {(now - self.last_cmd_time).to_sec():.2f}s since last command")
+            #     break
 
+            
+            # self.last_cmd_time = rospy.Time.now()
+            
             twist = self.compute_cmd_vel(norm_offset, depth_value)
-            self.last_cmd_time = rospy.Time.now()
-            
-            rospy.loginfo(f"Offset: {offset}, Depth: {depth_value:.2f} → "
-                          f"Linear: {twist.linear.x:.2f}, Angular: {twist.angular.z:.2f}")
-            
             
             break  # only act on the first person
 
-        self.cmd_pub.publish(twist)
+        if self.last_twist != twist:
+            # Only publish if the command has changed
+            self.cmd_pub.publish(twist)
+            rospy.loginfo(f"Linear: {twist.linear.x:.2f}, Angular: {twist.angular.z:.2f}")
+
+
+        self.last_twist = twist
         self.display_image()
 
 
@@ -132,8 +149,6 @@ class HumanFollower:
         # rospy.loginfo(f"[RGB] Image timestamp: {img_time:.6f}, Current time: {rospy.Time.now().to_sec():.6f}")
         self.rgb_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         self.process_images()
-        self.rgb_image = None  # Reset after processing
-        self.depth_image = None  # Reset depth image to avoid stale data
 
 
     def depth_callback(self, msg):
@@ -144,12 +159,10 @@ class HumanFollower:
         twist = Twist()
     
         # 1. Set linear speed based on distance
-        if depth > 3.0:
-            twist.linear.x = 0.3  # Far → move fast
-        elif depth > 2.0:
-            twist.linear.x = 0.25  # Medium distance → move slower
-        elif depth > 1.1:
-            twist.linear.x = 0.2  # Normal follow
+        if depth > 2.5:
+            twist.linear.x = 0.2  # Far → move fast
+        elif depth > 0.8:
+            twist.linear.x = 0.15  # Normal follow
         else:
             twist.linear.x = 0.0   # Stop
     
@@ -166,16 +179,16 @@ class HumanFollower:
         abs_offset = abs(norm_offset)
 
         if norm_offset > 0:  # Offset to the left → turn right
-            if abs_offset < 0.3:
+            if abs_offset < 0.2:
                 angular = 0.0
-            elif abs_offset < 0.5:
-                angular = -0.20  
-            elif abs_offset < 0.8:
-                angular = -0.25
+            # elif abs_offset < 0.5:
+            #     angular = -0.20  
+            # elif abs_offset < 0.8:
+            #     angular = -0.25
             else:
-                angular = -0.35
+                angular = -0.20
         else:  # Offset to the right → turn left
-            if abs_offset < 0.6: # too frequent command seems will be failed
+            if abs_offset < 0.2: # too frequent command seems will be failed
                 angular = 0.0
             else:
                 angular = 0.05
